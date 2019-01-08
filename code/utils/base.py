@@ -12,4 +12,5 @@ class BaseModel:
         values = ', '.join('{}={}'.format(k, v) for k, v in self.__dict__.items())
         return '{}({})'.format(type(self).__name__, values)
 
-
+    def on_end_fit(self):
+        raise NotImplementedError
