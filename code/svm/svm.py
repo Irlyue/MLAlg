@@ -2,6 +2,7 @@ import numpy as np
 
 from utils import base
 
+ALPHA_EPS = 1e-5
 KERNELS = {}
 
 
@@ -83,7 +84,7 @@ class SVM(base.BaseModel):
         The product of Lagrange multiplier alpha and label y. Only those corresponding to
         support vectors are considered.
     """
-    def __init__(self, C=1, tol=100, eps=1e-3, kernel='linear'):
+    def __init__(self, C=1, tol=10, eps=1e-3, kernel='linear'):
         """
         Parameters
         ----------
@@ -92,7 +93,7 @@ class SVM(base.BaseModel):
         then it's considered as not moving at all, the tolerance counter will increment
         itself by one.
         :param tol: int, the tolerance counter. If after `tol` loops, we still can't find
-        two alpha's to make a valid update, then we break out of the loop.
+        two alphas to make a valid update, then we break out of the loop.
         :param kernel: str or callable, default to linear kernel. Use callable to pass in
         kernel with extra parameters.
         """
@@ -121,25 +122,49 @@ class SVM(base.BaseModel):
         self.X, self.y = X, y
         self.K = self.kernel(self.X, self.X)
         self.alphas = np.zeros(m)
+        self.b = 0
 
         while counter < self.tol:
             counter += 1
             n_loops += 1
-            i, j = self._choose_two_alphas()
-            L, H = self._calc_LH(i, j)
-            if L == H:
-                continue
+            for i in range(m):
+                Ei = self._calc_E(i)
+                if (self.y[i] * Ei < -self.eps and self.alphas[i] < self.C) or \
+                   (self.y[i] * Ei > self.eps and self.alphas[i] > 0):
+                    j = self._choose_alpha_j(i)
+                    Ej = self._calc_E(j)
+                else:
+                    continue
 
-            alphai, alphaj = self._calc_alpha_ij(L, H, i, j)
-            if abs(alphai - self.alphas[i]) > self.eps:
-                counter = 0
-                self.alphas[i], self.alphas[j] = alphai, alphaj
+                L, H = self._calc_LH(i, j)
+                if L == H:
+                    continue
+
+                alphai, alphaj = self._calc_alpha_ij(L, H, i, j, Ei, Ej)
+                if abs(alphai - self.alphas[i]) > ALPHA_EPS:
+                    # If any of the alphas are changed, reset the counter
+                    counter = 0
+                    # update b
+                    self.b = self._calc_b(i, j, Ei, Ej, alphai, alphaj)
+                    self.alphas[i], self.alphas[j] = alphai, alphaj
 
         print('Done in %d loops.' % n_loops)
         self.on_end_fit()
 
+    def _calc_b(self, i, j, Ei, Ej, alphai, alphaj):
+        di, dj = self.alphas[i] - alphai, self.alphas[j] - alphaj
+        bi = self.b - Ei - self.y[i]*di*self.K[i, i]-self.y[j]*dj*self.K[i, j]
+        bj = self.b - Ej - self.y[i]*di*self.K[i, j]-self.y[j]*dj*self.K[j, j]
+        if 0 < alphai < self.C:
+            b = bi
+        elif 0 < alphaj < self.C:
+            b = bj
+        else:
+            b = (bi + bj) / 2.
+        return b
+
     def on_end_fit(self):
-        flag = self.alphas > self.eps
+        flag = self.alphas > 0.
         self.alphays = self.alphas[flag] * self.y[flag]
         self.sv = self.X[flag].copy()
         yp, yn = (self.y == 1), (self.y == -1)
@@ -148,16 +173,16 @@ class SVM(base.BaseModel):
         b2 = np.max((self.kernel(Xn, self.sv) * self.alphays[None]).sum(axis=1))
         self.b = -0.5 * (b1 + b2)
 
-    def _choose_two_alphas(self):
+    def _choose_alpha_j(self, i):
         """
-        Randomly choose two alpha's.
+        Randomly choose the second alpha.
 
-        :return i, j: the indices of the two alpha's.
+        :return j: the indice of the second alpha.
         """
         while True:
-            i, j = np.random.randint(self.alphas.size, size=(2,))
+            j = np.random.randint(self.alphas.size)
             if i != j:
-                return i, j
+                return j
 
     def _calc_LH(self, i, j):
         """
@@ -173,11 +198,10 @@ class SVM(base.BaseModel):
         return L, H
 
     def _calc_E(self, i):
-        return np.sum(self.K[i, :] * self.alphas * self.y) - self.y[i]
+        return np.sum(self.K[i, :] * self.alphas * self.y) + self.b - self.y[i]
 
-    def _calc_alpha_ij(self, L, H, i, j):
+    def _calc_alpha_ij(self, L, H, i, j, Ei, Ej):
         # calculate alpha_j
-        Ei, Ej = self._calc_E(i), self._calc_E(j)
         d = self.K[i, i] + self.K[j, j] - 2 * self.K[i, j]
         # only happen when there're duplicate points since
         # <x, x> + <y, y> - 2<x, y> = <x-y, x-y> > 0 if x != y
