@@ -89,13 +89,12 @@ class SVM(base.BaseModel):
         Parameters
         ----------
         :param C: float, normalization strength.
-        :param eps: float, a scalar very closed to zero. If |alpha_old - alpha_new| < eps,
-        then it's considered as not moving at all, the tolerance counter will increment
-        itself by one.
-        :param tol: int, the tolerance counter. If after `tol` loops, we still can't find
-        two alphas to make a valid update, then we break out of the loop.
-        :param kernel: str or callable, default to linear kernel. Use callable to pass in
-        kernel with extra parameters.
+        :param eps: float, a scalar very closed to zero. Use to verified if the KKT
+        conditions hold.
+        :param tol: int, the tolerance counter. If after `tol` loops, we still can't
+        find two alphas to make a valid update, then we break out of the loop.
+        :param kernel: str or callable, default to linear kernel. Use callable to
+        pass in kernel with extra parameters.
         """
         super().__init__()
         self.C = C
@@ -127,32 +126,42 @@ class SVM(base.BaseModel):
         while counter < self.tol:
             counter += 1
             n_loops += 1
+
+            # loop through each multiplier
+            changed = False
             for i in range(m):
-                Ei = self._calc_E(i)
-                if (self.y[i] * Ei < -self.eps and self.alphas[i] < self.C) or \
-                   (self.y[i] * Ei > self.eps and self.alphas[i] > 0):
-                    j = self._choose_alpha_j(i)
-                    Ej = self._calc_E(j)
-                else:
-                    continue
-
-                L, H = self._calc_LH(i, j)
-                if L == H:
-                    continue
-
-                alphai, alphaj = self._calc_alpha_ij(L, H, i, j, Ei, Ej)
-                if abs(alphai - self.alphas[i]) > ALPHA_EPS:
-                    # If any of the alphas are changed, reset the counter
+                if self.inner_loop(i):
+                    changed = True
                     counter = 0
-                    # update b
-                    self.b = self._calc_b(i, j, Ei, Ej, alphai, alphaj)
-                    self.alphas[i], self.alphas[j] = alphai, alphaj
+
+            # loop through those non-bound multipliers
+            while changed:
+                changed = False
+                unbound = np.nonzero((self.alphas > 0) * (self.alphas < self.C))[0]
+                for i in unbound:
+                    if self.inner_loop(i):
+                        changed = True
 
         print('Done in %d loops.' % n_loops)
         self.on_end_fit()
 
+    def inner_loop(self, i):
+        Ei = self._calc_E(i)
+        if (self.y[i] * Ei < -self.eps and self.alphas[i] < self.C) or \
+           (self.y[i] * Ei > self.eps and self.alphas[i] > 0):
+            # j, Ej = self._select_alpha_j(i, Ei)
+            j = self._choose_alpha_j(i)
+            Ej = self._calc_E(j)
+            alphai, alphaj = self._calc_alpha_ij(i, j, Ei, Ej)
+            if abs(alphaj - self.alphas[j]) > ALPHA_EPS:
+                # update b
+                self.b = self._calc_b(i, j, Ei, Ej, alphai, alphaj)
+                self.alphas[i], self.alphas[j] = alphai, alphaj
+                return True
+        return False
+
     def _calc_b(self, i, j, Ei, Ej, alphai, alphaj):
-        di, dj = self.alphas[i] - alphai, self.alphas[j] - alphaj
+        di, dj = alphai - self.alphas[i], alphaj - self.alphas[j]
         bi = self.b - Ei - self.y[i]*di*self.K[i, i]-self.y[j]*dj*self.K[i, j]
         bj = self.b - Ej - self.y[i]*di*self.K[i, j]-self.y[j]*dj*self.K[j, j]
         if 0 < alphai < self.C:
@@ -164,20 +173,18 @@ class SVM(base.BaseModel):
         return b
 
     def on_end_fit(self):
+        """
+        Store the support vectors for prediction.
+        """
         flag = self.alphas > 0.
         self.alphays = self.alphas[flag] * self.y[flag]
         self.sv = self.X[flag].copy()
-        yp, yn = (self.y == 1), (self.y == -1)
-        Xp, Xn = self.X[yp], self.X[yn]
-        b1 = np.min((self.kernel(Xp, self.sv) * self.alphays[None]).sum(axis=1))
-        b2 = np.max((self.kernel(Xn, self.sv) * self.alphays[None]).sum(axis=1))
-        self.b = -0.5 * (b1 + b2)
 
     def _choose_alpha_j(self, i):
         """
         Randomly choose the second alpha.
 
-        :return j: the indice of the second alpha.
+        :return j: the index of the second alpha.
         """
         while True:
             j = np.random.randint(self.alphas.size)
@@ -200,7 +207,8 @@ class SVM(base.BaseModel):
     def _calc_E(self, i):
         return np.sum(self.K[i, :] * self.alphas * self.y) + self.b - self.y[i]
 
-    def _calc_alpha_ij(self, L, H, i, j, Ei, Ej):
+    def _calc_alpha_ij(self, i, j, Ei, Ej):
+        L, H = self._calc_LH(i, j)
         # calculate alpha_j
         d = self.K[i, i] + self.K[j, j] - 2 * self.K[i, j]
         # only happen when there're duplicate points since
@@ -231,7 +239,7 @@ class SVMLinear(SVM):
     Almost the same implementation with the kernel version except that we could obtain
     the actual parameters `w` and `b` when using linear kernel.
     """
-    def __init__(self, C=1, tol=100, eps=1e-3):
+    def __init__(self, C=1, tol=10, eps=1e-3):
         super().__init__(C=C, tol=tol, eps=eps, kernel='linear')
 
     def on_end_fit(self):
